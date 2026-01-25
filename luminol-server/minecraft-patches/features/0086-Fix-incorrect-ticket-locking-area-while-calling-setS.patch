@@ -9,29 +9,72 @@ See the comments on setSource in ThreadedTicketPropagator
 and the implementation of addTicketAtLevel on the original ChunkHolderManager
 
 diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkHolderManager.java b/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkHolderManager.java
-index 2745180094b48b10e7ca9d4ab28c7762637db7c3..0d1c6dfa40253e41c5b9895bc8f15cd0997c30a5 100644
+index 2745180094b48b10e7ca9d4ab28c7762637db7c3..e5532a2296b09727bd3d7b90a4ba1c5549f1fa2a 100644
 --- a/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkHolderManager.java
 +++ b/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkHolderManager.java
-@@ -713,7 +713,17 @@ public final class ChunkHolderManager {
+@@ -713,6 +713,11 @@ public final class ChunkHolderManager {
          final Ticket ticket = new Ticket(type, level, removeDelay);
          ((ChunkSystemTicket<T>)(Object)ticket).moonrise$setIdentifier(identifier);
  
--        final ReentrantAreaLock.Node ticketLock = lock ? this.ticketLockArea.lock(chunkX, chunkZ) : null;
 +        // Luminol start - Fix incorrect ticket locking area
-+        // (posX & ~(SECTION_SIZE - 1), posZ & ~(SECTION_SIZE - 1)) to (posX | (SECTION_SIZE - 1), posZ | (SECTION_SIZE - 1))
-+        final int sectionSize = ThreadedTicketLevelPropagator.SECTION_SIZE;
-+        final ReentrantAreaLock.Node ticketLock = lock ? this.ticketLockArea.lock(
-+                chunkX & ~(sectionSize - 1),
-+                chunkZ & ~(sectionSize - 1),
-+                chunkX | (sectionSize - 1),
-+                chunkZ | (sectionSize - 1)
-+        ) : null;
++        boolean result = false;
++        boolean shouldUpdateTicketLevel = false;
++        int levelAfter;
 +        // Luminol end - Fix incorrect ticket locking area
-+        // final ReentrantAreaLock.Node ticketLock = lock ? this.ticketLockArea.lock(chunkX, chunkZ) : null; // Luminol - Fix incorrect ticket locking area
+         final ReentrantAreaLock.Node ticketLock = lock ? this.ticketLockArea.lock(chunkX, chunkZ) : null;
          try {
              final TicketSet ticketsAtChunk = this.tickets.computeIfAbsent(chunk, (final long keyInMap) -> {
-                 return new TicketSet(4);
-@@ -836,7 +846,18 @@ public final class ChunkHolderManager {
+@@ -721,7 +726,8 @@ public final class ChunkHolderManager {
+ 
+             final int levelBefore = getTicketLevelAt(ticketsAtChunk);
+             final Ticket current = ticketsAtChunk.replace(ticket);
+-            final int levelAfter = getTicketLevelAt(ticketsAtChunk);
++            // final int levelAfter = getTicketLevelAt(ticketsAtChunk); // Luminol - Fix incorrect ticket locking area
++            levelAfter = getTicketLevelAt(ticketsAtChunk); // Luminol - Fix incorrect ticket locking area
+ 
+             if (current != ticket) {
+                 final long oldRemoveDelay = ((ChunkSystemTicket<T>)(Object)current).moonrise$getRemoveDelay();
+@@ -741,15 +747,37 @@ public final class ChunkHolderManager {
+             }
+ 
+             if (levelBefore != levelAfter) {
+-                this.updateTicketLevel(chunk, levelAfter);
++                // this.updateTicketLevel(chunk, levelAfter); // Luminol - Fix incorrect ticket locking area
++                shouldUpdateTicketLevel = true;
+             }
+ 
+-            return current == ticket;
++            // return current == ticket; // Luminol - Fix incorrect ticket locking area
++            result = current == ticket; // Luminol - Fix incorrect ticket locking area
+         } finally {
+             if (ticketLock != null) {
+                 this.ticketLockArea.unlock(ticketLock);
+             }
+         }
++        // Luminol start - Fix incorrect ticket locking area
++        if (shouldUpdateTicketLevel) {
++            // (posX & ~(SECTION_SIZE - 1), posZ & ~(SECTION_SIZE - 1)) to (posX | (SECTION_SIZE - 1), posZ | (SECTION_SIZE - 1))
++            final int sectionSize = ThreadedTicketLevelPropagator.SECTION_SIZE;
++            final ReentrantAreaLock.Node lockForLevelUpdate = lock ? this.ticketLockArea.lock(
++                    chunkX & ~(sectionSize - 1),
++                    chunkZ & ~(sectionSize - 1),
++                    chunkX | (sectionSize - 1),
++                    chunkZ | (sectionSize - 1)
++            ) : null;
++            try {
++                this.updateTicketLevel(chunk, levelAfter);
++            }finally {
++                if (lockForLevelUpdate != null) {
++                    this.ticketLockArea.unlock(lockForLevelUpdate);
++                }
++            }
++        }
++        return result;
++        // Luminol end
+     }
+ 
+     private void addTicketCounter(final TicketType type, final long pos) {
+@@ -836,7 +864,18 @@ public final class ChunkHolderManager {
      // atomic with respect to all add/remove/addandremove ticket calls for the given chunk
      public <T, V> void addAndRemoveTickets(final long chunk, final TicketType addType, final int addLevel, final T addIdentifier,
                                             final TicketType removeType, final int removeLevel, final V removeIdentifier) {
@@ -51,7 +94,7 @@ index 2745180094b48b10e7ca9d4ab28c7762637db7c3..0d1c6dfa40253e41c5b9895bc8f15cd0
          try {
              this.addTicketAtLevel(addType, chunk, addLevel, addIdentifier, false);
              this.removeTicketAtLevel(removeType, chunk, removeLevel, removeIdentifier, false);
-@@ -848,7 +869,18 @@ public final class ChunkHolderManager {
+@@ -848,7 +887,18 @@ public final class ChunkHolderManager {
      // atomic with respect to all add/remove/addandremove ticket calls for the given chunk
      public <T, V> boolean addIfRemovedTicket(final long chunk, final TicketType addType, final int addLevel, final T addIdentifier,
                                               final TicketType removeType, final int removeLevel, final V removeIdentifier) {
@@ -71,7 +114,7 @@ index 2745180094b48b10e7ca9d4ab28c7762637db7c3..0d1c6dfa40253e41c5b9895bc8f15cd0
          try {
              if (this.removeTicketAtLevel(removeType, chunk, removeLevel, removeIdentifier, false)) {
                  this.addTicketAtLevel(addType, chunk, addLevel, addIdentifier, false);
-@@ -1102,9 +1134,10 @@ public final class ChunkHolderManager {
+@@ -1102,9 +1152,10 @@ public final class ChunkHolderManager {
          final Thread waiter = Thread.currentThread();
          final Long entityLoadId = ChunkTaskScheduler.getNextEntityLoadId();
          NewChunkHolder.GenericDataLoadTaskCallback loadTask = null;
@@ -83,7 +126,7 @@ index 2745180094b48b10e7ca9d4ab28c7762637db7c3..0d1c6dfa40253e41c5b9895bc8f15cd0
              final ReentrantAreaLock.Node schedulingLock = this.taskScheduler.schedulingLockArea.lock(chunkX, chunkZ);
              try {
                  current = this.getOrCreateChunkHolder(chunkX, chunkZ);
-@@ -1185,9 +1218,10 @@ public final class ChunkHolderManager {
+@@ -1185,9 +1236,10 @@ public final class ChunkHolderManager {
          final Thread waiter = Thread.currentThread();
          final Long poiLoadId = ChunkTaskScheduler.getNextPoiLoadId();
          NewChunkHolder.GenericDataLoadTaskCallback loadTask = null;
@@ -95,7 +138,7 @@ index 2745180094b48b10e7ca9d4ab28c7762637db7c3..0d1c6dfa40253e41c5b9895bc8f15cd0
              final ReentrantAreaLock.Node schedulingLock = this.taskScheduler.schedulingLockArea.lock(chunkX, chunkZ);
              try {
                  current = this.getOrCreateChunkHolder(chunkX, chunkZ);
-@@ -1416,7 +1450,17 @@ public final class ChunkHolderManager {
+@@ -1416,7 +1468,17 @@ public final class ChunkHolderManager {
              }
  
              // stage 3: actually attempt to remove the chunk holders
